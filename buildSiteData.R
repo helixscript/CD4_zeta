@@ -1,9 +1,9 @@
 library(tidyverse)
-library(GenomicRanges)
+library(RMySQL)
 
-# Merge data sets together -- mergedData has had 454 and Illumina data previously merged and illuminaOnlyData 
+# Merge data sets together -- mergedData has had 454 and Illumina data previously merged and illuminaOnlyData
 # includes data patient data for which only Illumina data has been collected.
-#---------------------------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------------------------
 mergedData <- bind_rows(lapply(list.files('data', pattern = 'intSites.csv', recursive = TRUE, full.names = TRUE), read_csv))
 mergedData$patient <- toupper(mergedData$patient)
 mergedData <- select(mergedData, patient, seqnames, start, strand, dataSource, GTSP, cellType, timePoint, reads, estAbund, relAbund)
@@ -20,27 +20,16 @@ names(illuminaOnlyData) <- c('patient', 'seqnames', 'position', 'strand', 'dataS
 sites <- bind_rows(mergedData, illuminaOnlyData)
 sites$posid <- paste0(sites$seqnames, sites$strand, sites$position)
 
+dbConn  <- dbConnect(MySQL(), group='intsites_miseq')
+intSitesamples <- dbGetQuery(dbConn, 'select sampleName, miseqid from samples where sampleName like "%GTSP%"')
+intSitesamples$sampleName <- gsub('\\-\\d+$', '', intSitesamples$sampleName)
+intSitesamples <- distinct(intSitesamples)
+invisible(sapply(dbListConnections(MySQL()), dbDisconnect))
 
-
-# Overlap analysis
-#---------------------------------------------------------------------------------------------------------------------------
-sites$start <- sites$position
-sites$end <- sites$position
-sites$siteGroup <- NA
-
-expandSitesBy <- 3
-
-g <- makeGRangesFromDataFrame(sites, keep.extra.columns = TRUE) + expandSitesBy
-r <- GenomicRanges::reduce(g, with.revmap = TRUE)
-
-siteGroup <- 1
-invisible(lapply(r$revmap, function(x){
-  if(length(x) > 1){
-    sites[sites$posid %in% unique(g[x]$posid),]$siteGroup <<- siteGroup
-    siteGroup <<- siteGroup + 1
-  }
+intSitesamples <- bind_rows(lapply(split(intSitesamples, intSitesamples$sampleName), function(x){
+  if(n_distinct(x$miseqid) > 1) x <- tibble(sampleName = x$sampleName[1], miseqid = paste0(sort(unique(x$miseqid)), collapse = ' / '))
+  x
 }))
 
-o <- select(sites[! is.na(sites$siteGroup),], siteGroup, patient, dataSource, posid, internalSampleID, cellType, timePoint, reads, estAbund, relAbund) %>% arrange(siteGroup) 
-
-openxlsx::write.xlsx(o, 'overlappingSites.xlsx')
+sites <- left_join(sites, intSitesamples, by = c('internalSampleID' = 'sampleName'))
+saveRDS(sites, 'sites.rds')
